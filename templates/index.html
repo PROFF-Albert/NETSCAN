@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NETSCAN</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <aside>
+    <div class="brand"><span>◈</span> NETSCAN</div>
+    <nav><a class="active" href="#dashboard">▦ Dashboard</a><a href="#devices">⌁ Devices</a><a href="#reports">⇩ Reports</a><a href="#settings">⚙ Settings</a></nav>
+    <div class="side-foot">LOCAL NETWORK<br><b>● Monitoring active</b></div>
+  </aside>
+  <main>
+    <header><div><p class="eyebrow">NETWORK OPERATIONS</p><h1>Command center</h1></div><div class="actions"><span id="updated">Updating…</span><button id="scan">↻ Scan now</button></div></header>
+    <section class="cards" id="dashboard">
+      <div class="card"><small>TOTAL DEVICES</small><strong id="total">—</strong><span class="muted">Discovered on network</span></div>
+      <div class="card"><small>ONLINE DEVICES</small><strong class="green" id="online">—</strong><span class="muted">Currently responding</span></div>
+      <div class="card"><small>OFFLINE DEVICES</small><strong class="red" id="offline">—</strong><span class="muted">Not responding</span></div>
+      <div class="card"><small>NETWORK HEALTH</small><strong class="blue" id="health">—%</strong><span class="muted">Availability score</span></div>
+      <div class="card"><small>AVG LATENCY</small><strong id="latency">— ms</strong><span class="muted">Across online devices</span></div>
+    </section>
+    <section class="grid">
+      <div class="panel wide" id="device-inventory">
+        <div class="panel-head"><div><h2>Device inventory</h2><p>Devices observed during authorized discovery scans</p></div><div class="filters"><input id="search" placeholder="Search IP, hostname, or vendor…"><select id="status"><option value="">All statuses</option><option>online</option><option>offline</option></select></div></div>
+        <div class="table-wrap"><table><thead><tr><th>DEVICE NAME</th><th>IP ADDRESS</th><th>MAC ADDRESS</th><th>VENDOR</th><th>STATUS</th><th>LAST SEEN</th><th></th></tr></thead><tbody id="device-rows"><tr><td colspan="7" class="empty">Loading inventory…</td></tr></tbody></table></div>
+      </div>
+      <div class="panel"><div class="panel-head"><div><h2>Availability</h2><p>Current network balance</p></div></div><div class="chartbox"><canvas id="healthChart"></canvas></div><div class="legend"><span><i class="dot online"></i> Online</span><span><i class="dot offline"></i> Offline</span></div></div>
+      <div class="panel"><div class="panel-head"><div><h2>Latency trend</h2><p>Recent response performance</p></div></div><div class="chartbox"><canvas id="latencyChart"></canvas></div></div>
+    </section>
+    <section class="panel settings" id="settings"><div class="panel-head"><div><h2>Monitoring settings</h2><p>Configure the local discovery cycle</p></div></div><form id="settings-form"><label>Network range<input id="network_range" required></label><label>Scan interval (seconds)<input id="scan_interval" type="number" min="10" required></label><label>Ping timeout (seconds)<input id="ping_timeout" type="number" step=".1" min=".1" required></label><label>Refresh rate (seconds)<input id="refresh_rate" type="number" min="5" required></label><button>Save settings</button></form></section>
+    <section class="panel reports" id="reports"><div><h2>Reports</h2><p>Export the current device inventory.</p></div><div><a class="button" href="/api/report/csv">Download CSV</a><a class="button secondary" href="/api/report/pdf">Download PDF</a></div></section>
+  </main>
+  <div id="toast"></div><script src="/static/app.js"></script>
+</body>
+</html>
