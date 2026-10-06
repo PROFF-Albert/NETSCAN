@@ -16,29 +16,33 @@ from slowapi.util import get_remote_address
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from .auth import create_access_token, verify_credentials, verify_token
 from .database import Base, SessionLocal, engine, get_db
 from .models import Device, OpenPort, PortScan, Scan, Setting, UptimeLog
 from .port_scanner import cancel_scan, job_status, submit_scan
 from .reports import csv_report, pdf_report, port_scan_pdf
-from .schemas import PortScanStart, SettingsIn
+from .schemas import LoginRequest, LoginResponse, PortScanStart, SettingsIn
 from .scanner import default_local_network, discover, probe
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("netscan")
 ROOT = Path(__file__).resolve().parents[1]
-API_TOKEN = os.getenv("NETSCAN_API_TOKEN")
 
 limiter = Limiter(key_func=get_remote_address)
 
 
-def verify_api_token(authorization: str | None = Header(default=None)) -> None:
-    if not API_TOKEN:
-        return
+def verify_bearer_token(authorization: str | None = Header(default=None)) -> str:
+    """Verify JWT bearer token and return username."""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail="Missing or invalid authorization header")
+    
     token = authorization.replace("Bearer ", "", 1).strip()
-    if token != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    username = verify_token(token)
+    
+    if not username:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    return username
 
 
 def device_payload(device: Device) -> dict:
@@ -157,7 +161,7 @@ async def lifespan(app):
         task.cancel()
 
 
-app = FastAPI(title="NETSCAN", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="NETSCAN - Admin Only", version="1.0.0", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
@@ -173,8 +177,21 @@ def port_scans_page():
     return (ROOT / "templates" / "port_scans.html").read_text().replace("NetWatch", "NETSCAN")
 
 
+@app.post("/api/login")
+@limiter.limit("5/minute")
+def login(credentials: LoginRequest) -> LoginResponse:
+    """Admin login endpoint. Returns JWT token on successful authentication."""
+    if not verify_credentials(credentials.username, credentials.password):
+        log.warning("Failed login attempt for user: %s", credentials.username)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    token, expires_in = create_access_token(credentials.username)
+    log.info("User %s successfully logged in", credentials.username)
+    return LoginResponse(access_token=token, expires_in=expires_in)
+
+
 @app.get("/api/summary")
-def summary(db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def summary(db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     total = db.query(Device).count()
     online = db.query(Device).filter_by(status="online").count()
     avg = (
@@ -193,7 +210,7 @@ def devices(
     status: str = Query(default=""),
     sort: str = Query(default="last_seen"),
     db: Session = Depends(get_db),
-    _auth: None = Depends(verify_api_token),
+    _username: str = Depends(verify_bearer_token),
 ):
     query = db.query(Device)
     if q:
@@ -205,7 +222,7 @@ def devices(
 
 
 @app.get("/api/devices/{device_id}")
-def device(device_id: int, db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def device(device_id: int, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     d = db.get(Device, device_id)
     if not d:
         raise HTTPException(404, "Device not found")
@@ -218,7 +235,7 @@ def device(device_id: int, db: Session = Depends(get_db), _auth: None = Depends(
 
 @app.post("/api/scan")
 @limiter.limit("5/minute")
-async def run_scan(db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+async def run_scan(db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     s = db.get(Setting, 1)
     results = await asyncio.to_thread(discover, s.network_range, s.ping_timeout)
     for r in results:
@@ -234,12 +251,13 @@ async def run_scan(db: Session = Depends(get_db), _auth: None = Depends(verify_a
         log.info("Saved device %s: hostname=%s mac=%s vendor=%s", d.ip_address, d.hostname or "Unknown", d.mac_address or "Unknown", d.vendor or "Unknown")
     db.add(Scan(devices_found=sum(r["status"] == "online" for r in results)))
     db.commit()
+    log.info("Network scan completed by admin: %s. Found %d devices", _username, sum(r["status"] == "online" for r in results))
     return {"found": sum(r["status"] == "online" for r in results)}
 
 
 @app.post("/api/devices/{device_id}/port-scans")
 @limiter.limit("10/minute")
-async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     if not payload.authorization_confirmed:
         raise HTTPException(400, "Confirm that you own or are authorized to test this device")
     d = db.get(Device, device_id)
@@ -260,12 +278,12 @@ async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = 
     db.commit()
     db.refresh(scan)
     job = submit_scan(scan.id, d.ip_address, payload.scan_type, payload.worker_count, payload.timeout_seconds, persist_port_scan_progress)
-    log.info("Authorized %s port scan %s started for device %s (%s)", payload.scan_type, scan.id, d.ip_address, total)
+    log.info("Admin %s authorized %s port scan %s started for device %s (%s)", _username, payload.scan_type, scan.id, d.ip_address, total)
     return {**scan_payload(scan), **job.snapshot()}
 
 
 @app.get("/api/port-scans")
-def list_port_scans(device_id: int | None = None, db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def list_port_scans(device_id: int | None = None, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     query = db.query(PortScan)
     if device_id is not None:
         query = query.filter_by(device_id=device_id)
@@ -280,7 +298,7 @@ def port_scan_detail(
     min_port: int = Query(default=1, ge=1, le=65535),
     max_port: int = Query(default=65535, ge=1, le=65535),
     db: Session = Depends(get_db),
-    _auth: None = Depends(verify_api_token),
+    _username: str = Depends(verify_bearer_token),
 ):
     if min_port > max_port:
         raise HTTPException(422, "min_port must be less than or equal to max_port")
@@ -301,7 +319,7 @@ def port_scan_detail(
 
 
 @app.post("/api/port-scans/{scan_id}/cancel")
-def cancel_port_scan(scan_id: int, db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def cancel_port_scan(scan_id: int, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     scan = db.get(PortScan, scan_id)
     if not scan:
         raise HTTPException(404, "Port scan not found")
@@ -309,16 +327,18 @@ def cancel_port_scan(scan_id: int, db: Session = Depends(get_db), _auth: None = 
         raise HTTPException(409, "Scan is not currently cancellable")
     scan.status = "cancelling"
     db.commit()
+    log.info("Admin %s cancelled port scan %s", _username, scan_id)
     return {"scan_id": scan_id, "status": "cancelling"}
 
 
 @app.get("/api/port-scans/{scan_id}/export/{format}")
-def export_port_scan(scan_id: int, format: str, db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def export_port_scan(scan_id: int, format: str, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     scan = db.get(PortScan, scan_id)
     if not scan:
         raise HTTPException(404, "Port scan not found")
     ports = db.query(OpenPort).filter_by(scan_id=scan_id).order_by(OpenPort.port).all()
     rows = [port_payload(port) for port in ports]
+    log.info("Admin %s exported port scan %s as %s", _username, scan_id, format)
     if format == "json":
         content = json.dumps({"scan": scan_payload(scan), "open_ports": rows}, indent=2).encode()
         return Response(content, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="netscan-port-scan-{scan_id}.json"'})
@@ -335,24 +355,26 @@ def export_port_scan(scan_id: int, format: str, db: Session = Depends(get_db), _
 
 
 @app.get("/api/settings")
-def get_settings(db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def get_settings(db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     return db.get(Setting, 1)
 
 
 @app.put("/api/settings")
-def put_settings(payload: SettingsIn, db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def put_settings(payload: SettingsIn, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     s = db.get(Setting, 1)
     s.scan_interval = payload.scan_interval
     s.network_range = payload.network_range
     s.refresh_rate = payload.refresh_rate
     s.ping_timeout = payload.ping_timeout
     db.commit()
+    log.info("Admin %s updated settings", _username)
     return {"status": "updated", "network_range": s.network_range}
 
 
 @app.get("/api/report/{kind}")
-def report(kind: str, db: Session = Depends(get_db), _auth: None = Depends(verify_api_token)):
+def report(kind: str, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     if kind not in ("csv", "pdf"):
         raise HTTPException(400, "Unsupported report type")
     path = csv_report(db.query(Device).all()) if kind == "csv" else pdf_report(db.query(Device).all())
+    log.info("Admin %s generated %s report", _username, kind)
     return FileResponse(path, filename=path.name)
