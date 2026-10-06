@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -179,12 +179,11 @@ def port_scans_page():
 
 @app.post("/api/login")
 @limiter.limit("5/minute")
-def login(credentials: LoginRequest) -> LoginResponse:
+def login(request: Request, credentials: LoginRequest) -> LoginResponse:
     """Admin login endpoint. Returns JWT token on successful authentication."""
     if not verify_credentials(credentials.username, credentials.password):
         log.warning("Failed login attempt for user: %s", credentials.username)
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
     token, expires_in = create_access_token(credentials.username)
     log.info("User %s successfully logged in", credentials.username)
     return LoginResponse(access_token=token, expires_in=expires_in)
@@ -206,6 +205,7 @@ def summary(db: Session = Depends(get_db), _username: str = Depends(verify_beare
 @app.get("/api/devices")
 @limiter.limit("60/minute")
 def devices(
+    request: Request,
     q: str = Query(default="", min_length=0, max_length=100),
     status: str = Query(default=""),
     sort: str = Query(default="last_seen"),
@@ -222,7 +222,7 @@ def devices(
 
 
 @app.get("/api/devices/{device_id}")
-def device(device_id: int, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+def device(request: Request, device_id: int, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     d = db.get(Device, device_id)
     if not d:
         raise HTTPException(404, "Device not found")
@@ -235,7 +235,7 @@ def device(device_id: int, db: Session = Depends(get_db), _username: str = Depen
 
 @app.post("/api/scan")
 @limiter.limit("5/minute")
-async def run_scan(db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+async def run_scan(request: Request, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     s = db.get(Setting, 1)
     results = await asyncio.to_thread(discover, s.network_range, s.ping_timeout)
     for r in results:
@@ -257,7 +257,7 @@ async def run_scan(db: Session = Depends(get_db), _username: str = Depends(verif
 
 @app.post("/api/devices/{device_id}/port-scans")
 @limiter.limit("10/minute")
-async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+async def start_port_scan(request: Request, device_id: int, payload: PortScanStart, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     if not payload.authorization_confirmed:
         raise HTTPException(400, "Confirm that you own or are authorized to test this device")
     d = db.get(Device, device_id)
@@ -283,7 +283,7 @@ async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = 
 
 
 @app.get("/api/port-scans")
-def list_port_scans(device_id: int | None = None, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+def list_port_scans(request: Request, device_id: int | None = None, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     query = db.query(PortScan)
     if device_id is not None:
         query = query.filter_by(device_id=device_id)
@@ -292,6 +292,7 @@ def list_port_scans(device_id: int | None = None, db: Session = Depends(get_db),
 
 @app.get("/api/port-scans/{scan_id}")
 def port_scan_detail(
+    request: Request,
     scan_id: int,
     open_only: bool = True,
     service: str = "",
@@ -319,7 +320,7 @@ def port_scan_detail(
 
 
 @app.post("/api/port-scans/{scan_id}/cancel")
-def cancel_port_scan(scan_id: int, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+def cancel_port_scan(request: Request, scan_id: int, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     scan = db.get(PortScan, scan_id)
     if not scan:
         raise HTTPException(404, "Port scan not found")
@@ -332,7 +333,7 @@ def cancel_port_scan(scan_id: int, db: Session = Depends(get_db), _username: str
 
 
 @app.get("/api/port-scans/{scan_id}/export/{format}")
-def export_port_scan(scan_id: int, format: str, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+def export_port_scan(request: Request, scan_id: int, format: str, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     scan = db.get(PortScan, scan_id)
     if not scan:
         raise HTTPException(404, "Port scan not found")
@@ -355,12 +356,12 @@ def export_port_scan(scan_id: int, format: str, db: Session = Depends(get_db), _
 
 
 @app.get("/api/settings")
-def get_settings(db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+def get_settings(request: Request, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     return db.get(Setting, 1)
 
 
 @app.put("/api/settings")
-def put_settings(payload: SettingsIn, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+def put_settings(request: Request, payload: SettingsIn, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     s = db.get(Setting, 1)
     s.scan_interval = payload.scan_interval
     s.network_range = payload.network_range
@@ -372,7 +373,7 @@ def put_settings(payload: SettingsIn, db: Session = Depends(get_db), _username: 
 
 
 @app.get("/api/report/{kind}")
-def report(kind: str, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
+def report(request: Request, kind: str, db: Session = Depends(get_db), _username: str = Depends(verify_bearer_token)):
     if kind not in ("csv", "pdf"):
         raise HTTPException(400, "Unsupported report type")
     path = csv_report(db.query(Device).all()) if kind == "csv" else pdf_report(db.query(Device).all())
