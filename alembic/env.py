@@ -1,8 +1,17 @@
 from logging.config import fileConfig
+from pathlib import Path
+import sys
 from alembic import context
 from sqlalchemy import engine_from_config, pool
-from backend.config import DATABASE_URL
-from backend.database import Base
+
+# Alembic executes this file with ``alembic/`` on sys.path, not necessarily
+# the project root. Add the root explicitly so `alembic upgrade head` works
+# from the documented project directory and from an installed console script.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from backend.database import Base, DATABASE_URL
 from backend import models  # noqa: F401: registers all metadata
 
 config = context.config

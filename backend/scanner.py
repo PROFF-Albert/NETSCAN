@@ -40,8 +40,14 @@ def vendor_for(mac_address: str | None) -> str | None:
 
 def default_local_network() -> str | None:
     """Return the first active private IPv4 subnet without sending traffic."""
-    for interface, addresses in psutil.net_if_addrs().items():
-        stats = psutil.net_if_stats().get(interface)
+    try:
+        interfaces = psutil.net_if_addrs()
+        interface_stats = psutil.net_if_stats()
+    except (OSError, PermissionError) as exc:
+        log.warning("Could not inspect local interfaces: %s", exc)
+        return None
+    for interface, addresses in interfaces.items():
+        stats = interface_stats.get(interface)
         if stats and not stats.isup:
             continue
         for address in addresses:
@@ -66,9 +72,9 @@ def probe(ip: str, timeout: float):
 def discover(cidr: str, timeout: float = 1.0):
     """Explicit ARP discovery, with a graceful ICMP-only fallback."""
     net = ip_network(cidr, strict=False)
-    hosts = list(net.hosts())[:1024]
-    if not net.is_private:
-        raise ValueError("Discovery is limited to private IPv4 networks")
+    if not isinstance(net, IPv4Network) or not net.is_private or net.num_addresses > 1024:
+        raise ValueError("Discovery is limited to private IPv4 networks with at most 1,024 addresses")
+    hosts = list(net.hosts())
     try:
         from scapy.all import ARP, Ether, srp
         answered, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(net)), timeout=2, verbose=False)

@@ -25,7 +25,7 @@ def safe_hostname(ip_address: str) -> str | None:
 def discover(network_range: str, db: Session) -> dict:
     """Send ARP only to the caller-authorized private range and persist replies."""
     network = ipaddress.ip_network(network_range, strict=False)
-    if not network.is_private or network.num_addresses > 1024:
+    if not isinstance(network, ipaddress.IPv4Network) or not network.is_private or network.num_addresses > 1024:
         raise ValueError("Discovery is limited to private networks with at most 1,024 addresses")
     try:
         from scapy.all import ARP, Ether, srp  # imported lazily; needs OS packet permission
@@ -46,9 +46,9 @@ def discover(network_range: str, db: Session) -> dict:
             device.hostname = device.hostname or safe_hostname(ip_address)
             device.vendor = device.vendor or vendor_for(mac)
         db.flush()
-        db.add(UptimeLog(device_id=device.id, timestamp=now, response_time=None, packet_loss=0, status="online"))
+        db.add(UptimeLog(device_id=device.id, timestamp=now, response_time=None, status="online"))
         found.append(ip_address)
-    db.add(Scan(network_range=str(network), devices_found=len(found), scan_type="discovery"))
+    db.add(Scan(devices_found=len(found)))
     db.commit()
     return {"network_range": str(network), "devices_found": len(found), "devices": found}
 
@@ -65,7 +65,7 @@ def monitor_devices(db: Session, timeout: float) -> int:
         device.status = "online" if online else "offline"
         if online:
             device.last_seen = now
-        db.add(UptimeLog(device_id=device.id, timestamp=now, response_time=(seconds * 1000 if seconds is not None else None), packet_loss=(0 if online else 100), status=device.status))
+        db.add(UptimeLog(device_id=device.id, timestamp=now, response_time=(seconds * 1000 if seconds is not None else None), status=device.status))
         count += 1
     db.commit()
     return count

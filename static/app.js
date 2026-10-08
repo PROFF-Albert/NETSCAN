@@ -65,12 +65,22 @@ async function loadSettings() {
 }
 
 async function portScan(id) {
-  toast("Scanning common ports…");
+  if (!window.confirm("Confirm that you own or are authorized to test this device.")) return;
+  toast("Starting authorized quick port scan…");
   try {
-    const result = await api(`/api/devices/${id}/ports`, {method:"POST"});
-    const open = result.results.filter((entry) => entry.state === "open").map((entry) => `${entry.port} ${entry.service}`).join(", ") || "No open common ports";
-    toast(`${result.ip}: ${open}`);
-  } catch (_) { toast("Port scan failed"); }
+    const scan = await api(`/api/devices/${id}/port-scans`, {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({scan_type:"quick",authorization_confirmed:true})});
+    const poll = async () => {
+      const result = await api(`/api/port-scans/${scan.id}`);
+      if (["queued", "running", "cancelling"].includes(result.status)) {
+        toast(`Port scan: ${result.scanned_ports}/${result.total_ports}`);
+        window.setTimeout(poll, 750);
+        return;
+      }
+      const open = result.ports.map((entry) => `${entry.port} ${entry.service}`).join(", ") || "No open ports found";
+      toast(result.status === "completed" ? open : `Port scan ${result.status}`);
+    };
+    poll();
+  } catch (_) { toast("Could not start port scan"); }
 }
 
 $("scan").onclick = async () => {

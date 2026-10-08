@@ -8,7 +8,7 @@ from reportlab.pdfgen import canvas
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from ..config import REPORTS_DIR
-from ..models import Device, PortScan, Scan, UptimeLog
+from ..models import Device, OpenPort, PortScan, UptimeLog
 
 
 def rows_for_report(db: Session) -> list[dict]:
@@ -16,8 +16,8 @@ def rows_for_report(db: Session) -> list[dict]:
     for device in db.scalars(select(Device).order_by(Device.ip_address)).all():
         logs = db.scalars(select(UptimeLog).where(UptimeLog.device_id == device.id)).all()
         uptime = round(100 * sum(log.status == "online" for log in logs) / len(logs), 1) if logs else 0.0
-        latest_ports = db.scalar(select(PortScan).where(PortScan.ip_address == device.ip_address).order_by(PortScan.scan_time.desc()))
-        ports = ", ".join(str(item["port"]) for item in json.loads(latest_ports.results_json)) if latest_ports else ""
+        latest_scan = db.scalar(select(PortScan).where(PortScan.device_id == device.id).order_by(PortScan.timestamp.desc()))
+        ports = ", ".join(str(item.port) for item in db.scalars(select(OpenPort).where(OpenPort.scan_id == latest_scan.id).order_by(OpenPort.port))) if latest_scan else ""
         rows.append({"hostname": device.hostname or "Unknown", "ip_address": device.ip_address, "mac_address": device.mac_address or "", "vendor": device.vendor or "Unknown", "status": device.status, "first_seen": device.first_seen.isoformat(), "last_seen": device.last_seen.isoformat() if device.last_seen else "", "uptime_percent": uptime, "open_ports": ports})
     return rows
 

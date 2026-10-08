@@ -1,21 +1,26 @@
-import asyncio, csv, io, json, logging, os
+import asyncio, csv, io, json, logging, threading, time
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
+from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db, SessionLocal
+from .config import LOG_LEVEL, RATE_LIMIT_PER_MINUTE
 from .models import Device, Scan, UptimeLog, Setting, PortScan, OpenPort
-from .schemas import SettingsIn, PortScanStart
+from .schemas import PortScanRequest, SettingsIn, PortScanStart
 from .scanner import default_local_network, discover, probe, scan_ports
 from .reports import csv_report, pdf_report, port_scan_pdf
 from .port_scanner import cancel_scan, job_status, submit_scan
 
-logging.basicConfig(level=logging.INFO); log=logging.getLogger('netscan')
+logging.basicConfig(level=LOG_LEVEL); log=logging.getLogger('netscan')
 ROOT=Path(__file__).resolve().parents[1]
+request_times: dict[str, deque[float]] = defaultdict(deque)
+request_times_lock = threading.Lock()
 
 
 def device_payload(device: Device) -> dict:
@@ -95,11 +100,30 @@ async def lifespan(app):
     seed(); task=asyncio.create_task(background_monitor()); yield; task.cancel()
 app=FastAPI(title='NETSCAN', version='1.0.0', lifespan=lifespan)
 app.mount('/static',StaticFiles(directory=ROOT/'static'),name='static')
+
+@app.middleware('http')
+async def local_rate_limit(request: Request, call_next):
+    """Keep the documented local API limit without rate-limiting static files."""
+    if request.url.path.startswith('/api/'):
+        client = request.client.host if request.client else 'unknown'
+        now = time.monotonic()
+        with request_times_lock:
+            timestamps = request_times[client]
+            while timestamps and now - timestamps[0] >= 60:
+                timestamps.popleft()
+            if len(timestamps) >= RATE_LIMIT_PER_MINUTE:
+                return JSONResponse({'detail': 'Rate limit exceeded'}, status_code=429, headers={'Retry-After': '60'})
+            timestamps.append(now)
+    return await call_next(request)
 @app.get('/',response_class=HTMLResponse)
 def home(): return (ROOT/'templates'/'index.html').read_text().replace('NetWatch', 'NETSCAN')
 @app.get('/port-scans', response_class=HTMLResponse)
-def port_scans_page(): return (ROOT/'templates'/'port_scans.html').read_text().replace('NetWatch', 'NETSCAN')
+def port_scans_page():
+    # A prior build linked here without supplying a template. Preserve old
+    # bookmarks without turning them into a server error.
+    return RedirectResponse(url='/', status_code=307)
 @app.get('/api/summary')
+@app.get('/api/dashboard')
 def summary(db:Session=Depends(get_db)):
     total=db.query(Device).count(); online=db.query(Device).filter_by(status='online').count()
     avg=db.query(func.avg(UptimeLog.response_time)).filter(UptimeLog.status=='online',UptimeLog.response_time!=None).scalar()
@@ -119,8 +143,12 @@ def device(device_id:int,db:Session=Depends(get_db)):
     logs=db.query(UptimeLog).filter_by(device_id=device_id).order_by(UptimeLog.timestamp.desc()).limit(100).all()
     return {'device': device_payload(d), 'logs':[{'timestamp':x.timestamp.isoformat(), 'status':x.status,'response_time':x.response_time} for x in logs]}
 @app.post('/api/scan')
+@app.post('/api/discover')
 async def run_scan(db:Session=Depends(get_db)):
-    s=db.get(Setting,1); results=await asyncio.to_thread(discover,s.network_range,s.ping_timeout)
+    s=db.get(Setting,1)
+    if not s: raise HTTPException(503, 'Settings are not initialized yet')
+    try: results=await asyncio.to_thread(discover,s.network_range,s.ping_timeout)
+    except ValueError as exc: raise HTTPException(422, str(exc)) from exc
     for r in results:
         d=db.query(Device).filter_by(ip_address=r['ip_address']).first() or Device(ip_address=r['ip_address'],first_seen=r['last_seen'])
         d.hostname=r.get('hostname') or d.hostname
@@ -132,12 +160,47 @@ async def run_scan(db:Session=Depends(get_db)):
         log.info("Saved device %s: hostname=%s mac=%s vendor=%s", d.ip_address,
                  d.hostname or "Unknown", d.mac_address or "Unknown", d.vendor or "Unknown")
     db.add(Scan(devices_found=sum(r['status']=='online' for r in results))); db.commit(); return {'found':sum(r['status']=='online' for r in results)}
+@app.post('/api/monitor')
+async def monitor_now(db: Session = Depends(get_db)):
+    """Monitor known devices once, without discovering additional hosts."""
+    setting = db.get(Setting, 1)
+    if not setting: raise HTTPException(503, 'Settings are not initialized yet')
+    monitored = 0
+    for device in db.query(Device).all():
+        result = await asyncio.to_thread(probe, device.ip_address, setting.ping_timeout)
+        device.hostname = result['hostname'] or device.hostname
+        device.status = result['status']
+        if result['status'] == 'online': device.last_seen = result['last_seen']
+        db.add(UptimeLog(device_id=device.id, response_time=result['latency'], status=result['status']))
+        monitored += 1
+    db.commit()
+    return {'monitored': monitored}
+@app.post('/api/ports')
+async def quick_ports(payload: PortScanRequest, db: Session = Depends(get_db)):
+    """Compatibility endpoint for the documented bounded common-port check."""
+    if not payload.permission_confirmed:
+        raise HTTPException(400, 'Confirm authorization before scanning ports')
+    results = await asyncio.to_thread(scan_ports, payload.ip_address)
+    device = db.query(Device).filter_by(ip_address=payload.ip_address).first()
+    if device:
+        open_results = [result for result in results if result['state'] == 'open']
+        scan = PortScan(device_id=device.id, scan_type='quick', status='completed', total_ports=len(results),
+                        scanned_ports=len(results), open_ports_found=len(open_results), timeout_seconds=.5, worker_count=16)
+        db.add(scan); db.flush()
+        for result in open_results:
+            db.add(OpenPort(scan_id=scan.id, port=result['port'], service=result['service'], state=result['state']))
+        db.commit()
+    return {'ip_address': payload.ip_address, 'results': results}
 @app.post('/api/devices/{device_id}/port-scans')
 async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = Depends(get_db)):
     if not payload.authorization_confirmed:
         raise HTTPException(400, 'Confirm that you own or are authorized to test this device')
     d=db.get(Device,device_id)
     if not d: raise HTTPException(404,'Device not found')
+    try: target = ip_address(d.ip_address)
+    except ValueError: raise HTTPException(400, 'Device has an invalid IP address')
+    if not isinstance(target, IPv4Address) or not (target.is_private or target.is_loopback):
+        raise HTTPException(400, 'Port scanning is limited to private or loopback IPv4 devices')
     from .port_scanner import ports_for
     total = len(ports_for(payload.scan_type))
     scan = PortScan(device_id=d.id, scan_type=payload.scan_type, status='queued', total_ports=total,
@@ -198,6 +261,7 @@ def get_settings(db:Session=Depends(get_db)): return db.get(Setting,1)
 def put_settings(payload:SettingsIn,db:Session=Depends(get_db)):
     s=db.get(Setting,1); s.scan_interval=payload.scan_interval; s.network_range=payload.network_range; s.refresh_rate=payload.refresh_rate; s.ping_timeout=payload.ping_timeout; db.commit(); return s
 @app.get('/api/report/{kind}')
+@app.get('/api/reports/{kind}')
 def report(kind:str,db:Session=Depends(get_db)):
     if kind not in ('csv','pdf'): raise HTTPException(400,'Unsupported report type')
     path=csv_report(db.query(Device).all()) if kind=='csv' else pdf_report(db.query(Device).all())

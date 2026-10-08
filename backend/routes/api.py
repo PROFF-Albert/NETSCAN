@@ -6,9 +6,9 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from ..database import get_db
-from ..models import Device, PortScan, Scan, Setting, UptimeLog
+from ..models import Device, OpenPort, PortScan, Scan, Setting, UptimeLog
 from ..schemas import DiscoveryRequest, PortScanRequest, SettingsUpdate
-from ..services.network import discover, monitor_devices, scan_ports
+from ..services.network import COMMON_PORTS, discover, monitor_devices, scan_ports
 from ..services.reporting import archive_report, build_csv, build_pdf
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -56,7 +56,7 @@ def device_detail(device_id: int, db: Session = Depends(get_db)):
     logs = db.scalars(select(UptimeLog).where(UptimeLog.device_id == device_id).order_by(UptimeLog.timestamp.desc()).limit(200)).all()[::-1]
     uptime = round(100 * sum(x.status == "online" for x in logs) / len(logs), 1) if logs else 0
     return {"id": device.id, "hostname": device.hostname or "Unknown", "ip_address": device.ip_address, "mac_address": device.mac_address or "Unknown", "vendor": device.vendor or "Unknown", "status": device.status, "first_seen": device.first_seen.isoformat(), "last_seen": device.last_seen.isoformat() if device.last_seen else None, "uptime_percent": uptime,
-            "history": [{"timestamp": x.timestamp.isoformat(), "response_time": x.response_time, "packet_loss": x.packet_loss, "status": x.status} for x in logs]}
+            "history": [{"timestamp": x.timestamp.isoformat(), "response_time": x.response_time, "status": x.status} for x in logs]}
 
 
 @router.post("/discover")
@@ -71,7 +71,13 @@ async def ports(payload: PortScanRequest, db: Session = Depends(get_db)):
     if not payload.permission_confirmed: raise HTTPException(400, "Confirm authorization before scanning ports")
     results = await asyncio.to_thread(scan_ports, payload.ip_address)
     device = db.scalar(select(Device).where(Device.ip_address == payload.ip_address))
-    db.add(PortScan(device_id=device.id if device else None, ip_address=payload.ip_address, results_json=json.dumps(results))); db.commit()
+    if device:
+        scan = PortScan(device_id=device.id, scan_type="quick", status="completed", total_ports=len(COMMON_PORTS),
+                        scanned_ports=len(COMMON_PORTS), open_ports_found=len(results), timeout_seconds=.75, worker_count=1)
+        db.add(scan); db.flush()
+        for result in results:
+            db.add(OpenPort(scan_id=scan.id, port=result["port"], service=result["service"], state=result["state"]))
+    db.commit()
     return {"ip_address": payload.ip_address, "results": results}
 
 
