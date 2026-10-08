@@ -1,27 +1,48 @@
 import csv
 from pathlib import Path
+
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+
 from .models import Device, PortScan
-ROOT=Path(__file__).resolve().parents[1]; OUT=ROOT/'reports'; OUT.mkdir(exist_ok=True)
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "reports"
+OUT.mkdir(exist_ok=True)
+
+
 def csv_report(devices):
-    path=OUT/'netwatch-devices.csv'
-    with path.open('w', newline='') as f:
-        w=csv.writer(f); w.writerow(['IP Address','Hostname','MAC','Vendor','Status','First Seen','Last Seen'])
-        for d in devices: w.writerow([d.ip_address,d.hostname,d.mac_address,d.vendor,d.status,d.first_seen,d.last_seen])
+    path = OUT / "netwatch-devices.csv"
+    with path.open("w", newline="") as file:
+        writer = csv.writer(file)
+        writer.writerow(["IP Address", "Hostname", "MAC", "Vendor", "Status", "First Seen", "Last Seen"])
+        for device in devices:
+            writer.writerow([device.ip_address, device.hostname, device.mac_address, device.vendor, device.status, device.first_seen, device.last_seen])
     return path
+
+
 def pdf_report(devices):
-    path=OUT/'netwatch-report.pdf'; c=canvas.Canvas(str(path), pagesize=letter); y=750
-    c.setFont('Helvetica-Bold',16); c.drawString(50,y,'NetWatch Network Report'); y-=35; c.setFont('Helvetica',9)
-    for d in devices:
-        line=f'{d.ip_address} | {d.hostname or "-"} | {d.status} | {d.vendor or "Unknown"}'
-        c.drawString(50,y,line[:110]); y-=16
-        if y<50: c.showPage(); y=750
-    c.save(); return path
+    path = OUT / "netwatch-report.pdf"
+    report = canvas.Canvas(str(path), pagesize=letter)
+    y = 750
+    report.setFont("Helvetica-Bold", 16)
+    report.drawString(50, y, "NetWatch Network Report")
+    y -= 35
+    report.setFont("Helvetica", 9)
+    for device in devices:
+        line = f"{device.ip_address} | {device.hostname or '-'} | {device.status} | {device.vendor or 'Unknown'}"
+        report.drawString(50, y, line[:110])
+        y -= 16
+        if y < 50:
+            report.showPage()
+            y = 750
+            report.setFont("Helvetica", 9)
+    report.save()
+    return path
 
 
-def port_scan_pdf(scan: PortScan, ports: list[dict]):
-    """Create a compact, printable report for a persisted port scan."""
+def port_scan_pdf(scan: PortScan, ports: list[dict]) -> Path:
+    """Generate a printable report for a persisted port scan."""
     path = OUT / f"netscan-port-scan-{scan.id}.pdf"
     report = canvas.Canvas(str(path), pagesize=letter)
     _, height = letter
@@ -29,20 +50,31 @@ def port_scan_pdf(scan: PortScan, ports: list[dict]):
     report.setTitle(f"NETSCAN port scan {scan.id}")
     report.setFont("Helvetica-Bold", 16)
     report.drawString(48, y, "NETSCAN Port Scan Report")
-    y -= 24
-    report.setFont("Helvetica", 9)
-    report.drawString(48, y, f"Scan {scan.id} | {scan.scan_type} | status: {scan.status}")
+    y -= 28
+    report.setFont("Helvetica", 10)
+    report.drawString(48, y, f"Scan ID: {scan.id} | Type: {scan.scan_type} | Status: {scan.status}")
     y -= 16
     report.drawString(48, y, f"Ports scanned: {scan.scanned_ports}/{scan.total_ports}; open: {scan.open_ports_found}")
-    y -= 24
+    y -= 26
+    report.setFont("Helvetica-Bold", 9)
+    report.drawString(48, y, "Port")
+    report.drawString(105, y, "Protocol")
+    report.drawString(175, y, "Service")
+    report.drawString(300, y, "State")
+    report.drawString(360, y, "Banner")
+    y -= 14
+    report.setFont("Helvetica", 9)
     for port in ports:
         if y < 54:
             report.showPage()
             y = height - 48
             report.setFont("Helvetica", 9)
-        banner = (port.get("banner") or "").replace("\n", " ")
-        line = f"{port['port']}/{port['protocol']}  {port['service']}  {port['state']}  {banner}"
-        report.drawString(48, y, line[:120])
+        report.drawString(48, y, str(port.get("port", "N/A")))
+        report.drawString(105, y, str(port.get("protocol", "tcp"))[:12])
+        report.drawString(175, y, str(port.get("service", "unknown"))[:22])
+        report.drawString(300, y, str(port.get("state", "unknown"))[:12])
+        banner = str(port.get("banner") or "").replace("\n", " ").replace("\r", " ")
+        report.drawString(360, y, banner[:38])
         y -= 14
     report.save()
     return path
