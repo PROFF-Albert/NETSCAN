@@ -1,0 +1,9 @@
+.ports-heading { align-items: flex-start; }
+.quiet-button { background: #1c2b43; color: #c9d6e9; }
+.port-number { display: inline-block; background: #123a3a; color: var(--cyan); padding: 4px 7px; border-radius: 4px; font-weight: 700; }
+.scan-link { color: #91a8ff; text-decoration: none; }
+.scan-link:hover { text-decoration: underline; }
+@media (max-width: 850px) {
+  .ports-heading { display: block; }
+  .ports-heading .filters { margin-top: 16px; flex-wrap: wrap; }
+}

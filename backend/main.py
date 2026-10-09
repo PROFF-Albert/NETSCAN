@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import func
+from sqlalchemy import String, func
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db, SessionLocal
 from .config import LOG_LEVEL, RATE_LIMIT_PER_MINUTE
@@ -122,6 +122,11 @@ def port_scans_page():
     # A prior build linked here without supplying a template. Preserve old
     # bookmarks without turning them into a server error.
     return RedirectResponse(url='/', status_code=307)
+
+@app.get('/open-ports', response_class=HTMLResponse)
+def open_ports_page():
+    """Saved open-port findings from authorized scans."""
+    return (ROOT / 'templates' / 'open_ports.html').read_text()
 @app.get('/api/summary')
 @app.get('/api/dashboard')
 def summary(db:Session=Depends(get_db)):
@@ -216,6 +221,33 @@ def list_port_scans(device_id: int | None = None, db: Session = Depends(get_db))
     query = db.query(PortScan)
     if device_id is not None: query = query.filter_by(device_id=device_id)
     return [scan_payload(scan) for scan in query.order_by(PortScan.timestamp.desc()).limit(100).all()]
+
+@app.get('/api/open-ports')
+def list_open_ports(q: str = '', service: str = '', db: Session = Depends(get_db)):
+    """List persisted open ports with the device and scan that found them."""
+    query = (db.query(OpenPort, PortScan, Device)
+             .join(PortScan, OpenPort.scan_id == PortScan.id)
+             .join(Device, PortScan.device_id == Device.id)
+             .filter(OpenPort.state == 'open'))
+    if q:
+        term = f'%{q.strip()}%'
+        query = query.filter(
+            (Device.ip_address.ilike(term)) |
+            (Device.hostname.ilike(term)) |
+            (OpenPort.port.cast(String).ilike(term))
+        )
+    if service:
+        query = query.filter(OpenPort.service.ilike(f'%{service.strip()}%'))
+    rows = query.order_by(PortScan.timestamp.desc(), OpenPort.port.asc()).limit(500).all()
+    return [{
+        **port_payload(port),
+        'device_id': device.id,
+        'ip_address': device.ip_address,
+        'hostname': device.hostname,
+        'scan_id': scan.id,
+        'scan_type': scan.scan_type,
+        'scanned_at': scan.timestamp.isoformat() if scan.timestamp else None,
+    } for port, scan, device in rows]
 
 @app.get('/api/port-scans/{scan_id}')
 def port_scan_detail(scan_id: int, open_only: bool = True, service: str = '', min_port: int = 1, max_port: int = 65535, db: Session = Depends(get_db)):
