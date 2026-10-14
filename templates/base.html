@@ -1,1 +1,31 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}NetWatch{% endblock %}</title><link rel="stylesheet" href="/static/style.css"><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script><script src="/static/app.js" defer></script></head><body data-page="{{ page }}"><aside><div class="brand"><span>◈</span> NETWATCH</div><p class="caption">LOCAL NETWORK INTELLIGENCE</p><nav><a class="{% if page == 'dashboard' %}active{% endif %}" href="/">▦ Dashboard</a><a class="{% if page == 'devices' %}active{% endif %}" href="/devices">◉ Devices</a><a class="{% if page == 'reports' %}active{% endif %}" href="/reports">▤ Reports</a><a class="{% if page == 'settings' %}active{% endif %}" href="/settings">⚙ Settings</a></nav><div class="side-note"><i></i> LOCAL MODE<br><small>Authorized networks only</small></div></aside><main><header><button class="menu" aria-label="Toggle menu">☰</button><div><p class="eyebrow">NETWORK OPERATIONS CENTER</p><h1>{% block heading %}Dashboard{% endblock %}</h1></div><div class="header-actions"><button id="monitor-now" class="quiet">↻ Monitor now</button><span id="clock"></span></div></header>{% block content %}{% endblock %}</main><div id="toasts" aria-live="polite"></div></body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}NETSCAN{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/assessment.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to dashboard content</a>
+  <aside>
+    <div class="brand"><span>◈</span> NETSCAN</div>
+    <nav>
+      <a href="/" {% raw %}{% if request.path == '/' %}class="active"{% endif %}{% endraw %}>▦ Dashboard</a>
+      <a href="/#devices">⌁ Devices</a>
+      <a href="/open-ports">⌁ Open ports</a>
+      <a href="/#reports">⇩ Reports</a>
+      <a href="/#settings">⚙ Settings</a>
+    </nav>
+    <div class="side-foot">LOCAL NETWORK<br><b>● Monitoring active</b></div>
+  </aside>
+  <main id="main-content">
+    {% block heading %}{% endblock %}
+    {% block content %}{% endblock %}
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
