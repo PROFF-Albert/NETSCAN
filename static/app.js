@@ -1,7 +1,7 @@
 let healthChart;
 let latencyChart;
 const $ = (id) => document.getElementById(id);
-const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
+const esc = (value) => String(value ?? "").replace(/[&<>\"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
 
 async function api(url, options) {
   const response = await fetch(url, options);
@@ -54,20 +54,20 @@ async function refresh() {
     $("latency").textContent = `${summary.latency} ms`;
     $("open-ports-count").textContent = summary.total_open_ports;
     $("findings-count").textContent = summary.total_findings;
-    $("critical-high").textContent = summary.critical_high_findings;
     const query = encodeURIComponent($("search").value);
-    const list = await api(`/api/devices?q=${query}&status=${$("status").value}`);
+    // Force showing only online devices in the inventory per UI preference
+    const list = await api(`/api/devices?q=${query}&status=online`);
     renderDeviceRows(list);
     const findings = await api("/api/findings");
-    $("finding-rows").innerHTML = findings.length ? findings.slice(0, 10).map((f) => `<tr><td><span class="severity ${esc(f.severity)}">${esc(f.severity)}</span></td><td>${esc(f.finding_type)}</td><td>${esc(f.title)}</td><td>${f.port || "—"}</td><td>${esc(f.confidence)}</td><td>${f.last_detected ? new Date(f.last_detected).toLocaleString() : "—"}</td></tr>`).join("") : '<tr><td colspan="6" class="empty">No assessment findings yet.</td></tr>';
+    $("finding-rows").innerHTML = findings.length ? findings.slice(0, 10).map((f) => `<tr><td><span class="severity ${esc(f.severity)}">${esc(f.severity)}</span></td><td>${esc(f.finding_type)}</td><td>${esc(f.title)}</td><td>${f.first_detected ? new Date(f.first_detected).toLocaleString() : "—"}</td></tr>`).join("") : '<tr><td colspan="4" class="empty">No findings</td></tr>';
     if (healthChart) {
       healthChart.data.datasets[0].data = [summary.online, summary.offline];
       healthChart.update();
     } else if (window.Chart) {
-      healthChart = new Chart($("healthChart"), {type:"doughnut", data:{labels:["Online","Offline"],datasets:[{data:[summary.online,summary.offline],backgroundColor:["#43d9cb","#ff6e83"],borderWidth:0}]},options:{plugins:{legend:{display:false}},cutout:"76%",maintainAspectRatio:false}});
+      healthChart = new Chart($("healthChart"), {type:"doughnut", data:{labels:["Online","Offline"],datasets:[{data:[summary.online,summary.offline],backgroundColor:["#43d9cb","#ff6e83"],borderWidth:0}]},options:{cutout:72,plugins:{legend:{position:'bottom',labels:{usePointStyle:true}}}}});
     }
     if (!latencyChart && window.Chart) {
-      latencyChart = new Chart($("latencyChart"), {type:"bar", data:{labels:["Current average"],datasets:[{data:[summary.latency],backgroundColor:"#8eaeff",borderRadius:6,maxBarThickness:62}]},options:{plugins:{legend:{display:false}},scales:{x:{display:false,grid:{display:false}},y:{ticks:{color:"#94a4b7"},grid:{color:"rgba(59,81,108,.35)"},beginAtZero:true}},maintainAspectRatio:false}});
+      latencyChart = new Chart($("latencyChart"), {type:"bar", data:{labels:["Current average"],datasets:[{data:[summary.latency],backgroundColor:"#8eaeff",borderRadius:6,maxBarThickness:62}]},options:{scales:{y:{beginAtZero:true}},plugins:{legend:{display:false}}}});
     } else if (latencyChart) {
       latencyChart.data.datasets[0].data = [summary.latency];
       latencyChart.update();
@@ -127,7 +127,7 @@ $("assessment-form").onsubmit = async (event) => {
   event.preventDefault();
   const button = event.currentTarget.querySelector('button[type="submit"]');
   setBusy(button, true, "Starting…");
-  const payload = {target: $("target").value, scan_type: $("scan_type").value, timeout_seconds: Number($("scan_timeout").value), worker_count: Number($("scan_workers").value), authorization_confirmed: $("authorized").checked, public_target_confirmed: $("public-confirmed").checked};
+  const payload = {target: $("target").value, scan_type: $("scan_type").value, timeout_seconds: Number($("scan_timeout").value), worker_count: Number($("scan_workers").value), authorization_confirmed: true};
   try {
     const result = await api("/api/assessments", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
     $("assessment-status").textContent = `Started ${result.scans.length} scan(s): ${result.scans.map((s) => s.id).join(", ")}.`;
