@@ -1,4 +1,4 @@
-# NetWatch
+# NETSCAN
 
 NetWatch is a local-first network monitoring and device-discovery dashboard built with FastAPI, SQLAlchemy, SQLite, Scapy, Ping3, and Chart.js. It is designed as a computer-science portfolio project: it has a responsive cybersecurity-themed UI, a documented API, persistent history, migrations, reporting, and conservative network safeguards.
 
@@ -9,14 +9,16 @@ NetWatch is a local-first network monitoring and device-discovery dashboard buil
 - Recurring monitoring of *known* devices using ICMP ping; response time, loss, and history are stored.
 - Dashboard cards, availability, presence, latency, and new-device charts.
 - Search, status filters, sorting, device detail and uptime history.
-- Bounded common-port TCP connect scan, requiring an authorization confirmation.
-- CSV and PDF exports, archived under `reports/`.
+- Cancellable background TCP connect scans: Quick (100), Standard (1,000), and Full (1–65535), with bounded concurrency and progress.
+- Evidence-led vulnerability findings for insecure exposure and safe TLS observations; confirmed CVEs require trusted matching data, never a guessed banner.
+- Optional NVD 2.0 cache integration for exact trusted CPE queries; runs safely without an API key.
+- CSV, JSON, and PDF assessment reports, archived under `reports/`.
 - SQLite by default plus an Alembic initial migration.
 - Input validation, structured errors, in-memory local rate limiting, environment configuration, and application logging.
 
 ## Safety and scope
 
-Use only on networks and devices you own or have explicit permission to administer. Discovery is never automatic: use **Scan network**. Port scanning is limited to private/loopback IPs and requires a confirmation in the UI. NetWatch neither attempts credential access nor exploits services.
+Use only on networks and devices you own or have explicit permission to administer. Discovery is never automatic: use **Scan network**. Port scanning is limited to private/loopback IPs by default and requires confirmation; public IPs require a second explicit acknowledgement. NETSCAN neither attempts credential access nor exploits services.
 
 ## Installation and launch
 
@@ -63,6 +65,13 @@ source .venv/bin/activate
 alembic upgrade head
 ```
 
+If upgrading an existing development database created by an older release that used `create_all` and has no Alembic version, preserve it and stamp the initial revision once before upgrading:
+
+```bash
+alembic stamp 20261005_0001
+alembic upgrade head
+```
+
 ## Project layout
 
 ```text
@@ -88,6 +97,10 @@ See [Installation Guide](docs/INSTALLATION.md), [Architecture Guide](docs/ARCHIT
 - `POST /api/discover` — explicit authorized ARP discovery.
 - `POST /api/monitor` — one known-device monitoring cycle.
 - `POST /api/ports` — authorized common-port check.
+- `POST /api/assessments` — authorized target IP/CIDR assessment.
+- `GET /api/findings` — persisted potential, confirmed, and informational findings.
+- `POST /api/devices/{id}/nvd-cves` — optional exact-CPE NVD matching after a completed authorized scan.
+- `GET /api/port-scans/{id}` and `POST /api/port-scans/{id}/cancel` — progress and cancellation.
 - `GET /api/reports/csv` and `/api/reports/pdf` — report downloads.
 - `GET/PUT /api/settings` — local configuration.
 

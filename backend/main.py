@@ -2,7 +2,7 @@ import asyncio, csv, io, json, logging, threading, time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
-from ipaddress import IPv4Address, ip_address
+from ipaddress import IPv4Address, ip_address, ip_network
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -11,11 +11,14 @@ from sqlalchemy import String, func
 from sqlalchemy.orm import Session
 from .database import Base, engine, get_db, SessionLocal
 from .config import LOG_LEVEL, RATE_LIMIT_PER_MINUTE
-from .models import Device, Scan, UptimeLog, Setting, PortScan, OpenPort
-from .schemas import PortScanRequest, SettingsIn, PortScanStart
+from .models import Device, Scan, UptimeLog, Setting, PortScan, OpenPort, VulnerabilityFinding
+from .schemas import PortScanRequest, SettingsIn, PortScanStart, TargetScanStart, NvdCpeRequest
 from .scanner import default_local_network, discover, probe, scan_ports
-from .reports import csv_report, pdf_report, port_scan_pdf
+from .reports import csv_report, pdf_report, json_report, port_scan_pdf
 from .port_scanner import cancel_scan, job_status, submit_scan
+from .vulnerabilities import assess_scan, record_nvd_cves
+from .nvd import fetch_cves_for_cpe
+from .config import MAX_SCAN_CONCURRENCY
 
 logging.basicConfig(level=LOG_LEVEL); log=logging.getLogger('netscan')
 ROOT=Path(__file__).resolve().parents[1]
@@ -34,12 +37,21 @@ def device_payload(device: Device) -> dict:
         "status": device.status,
         "first_seen": device.first_seen.isoformat() if device.first_seen else None,
         "last_seen": device.last_seen.isoformat() if device.last_seen else None,
+        "average_response_time": None,
     }
 
 
 def port_payload(port: OpenPort) -> dict:
     return {"id": port.id, "port": port.port, "protocol": port.protocol,
-            "service": port.service, "banner": port.banner, "state": port.state}
+            "service": port.service, "banner": port.banner, "service_version": port.service_version,
+            "evidence": port.evidence, "state": port.state}
+
+
+def finding_payload(finding: VulnerabilityFinding) -> dict:
+    return {key: getattr(finding, key) for key in ("id", "finding_type", "severity", "confidence", "title", "cve_id", "cvss_score", "cvss_version", "service", "detected_version", "port", "protocol", "evidence", "description", "remediation", "reference_url", "source") } | {
+        "first_detected": finding.first_detected.isoformat() if finding.first_detected else None,
+        "last_detected": finding.last_detected.isoformat() if finding.last_detected else None,
+    }
 
 
 def scan_payload(scan: PortScan) -> dict:
@@ -63,8 +75,11 @@ def persist_port_scan_progress(job, results, finalized: bool) -> None:
         scan.error = snapshot["error"]
         for result in results or []:
             db.add(OpenPort(scan_id=scan.id, port=result["port"], protocol=result["protocol"],
-                            service=result["service"], banner=result["banner"], state=result["state"]))
+                            service=result["service"], banner=result["banner"],
+                            service_version=result.get("service_version"), evidence=result.get("evidence"), state=result["state"]))
         db.commit()
+        if finalized and scan.status == "completed":
+            assess_scan(db, scan)
     except Exception:
         db.rollback(); log.exception("Could not persist port scan %s progress", job.scan_id)
     finally:
@@ -127,13 +142,22 @@ def port_scans_page():
 def open_ports_page():
     """Saved open-port findings from authorized scans."""
     return (ROOT / 'templates' / 'open_ports.html').read_text()
+@app.get('/devices/{device_id}', response_class=HTMLResponse)
+def device_page(device_id: int):
+    return (ROOT / 'templates' / 'device.html').read_text().replace('{{ device_id }}', str(device_id))
 @app.get('/api/summary')
 @app.get('/api/dashboard')
 def summary(db:Session=Depends(get_db)):
     total=db.query(Device).count(); online=db.query(Device).filter_by(status='online').count()
     avg=db.query(func.avg(UptimeLog.response_time)).filter(UptimeLog.status=='online',UptimeLog.response_time!=None).scalar()
     health=round(online/total*100) if total else 0
-    return {'total':total,'online':online,'offline':max(total-online,0),'health':health,'latency':round(avg or 0,2)}
+    open_ports = db.query(OpenPort).filter_by(state="open").count()
+    findings = db.query(VulnerabilityFinding)
+    return {'total':total,'online':online,'offline':max(total-online,0),'health':health,'latency':round(avg or 0,2),
+            'total_open_ports': open_ports, 'total_findings': findings.count(),
+            'critical_high_findings': findings.filter(VulnerabilityFinding.severity.in_(["Critical", "High"])).count(),
+            'recent_scans': [scan_payload(x) for x in db.query(PortScan).order_by(PortScan.timestamp.desc()).limit(5)],
+            'recent_findings': [finding_payload(x) for x in findings.order_by(VulnerabilityFinding.last_detected.desc()).limit(5)]}
 @app.get('/api/devices')
 def devices(q:str='', status:str='', sort:str='last_seen', db:Session=Depends(get_db)):
     query=db.query(Device)
@@ -146,7 +170,13 @@ def device(device_id:int,db:Session=Depends(get_db)):
     d=db.get(Device,device_id)
     if not d: raise HTTPException(404,'Device not found')
     logs=db.query(UptimeLog).filter_by(device_id=device_id).order_by(UptimeLog.timestamp.desc()).limit(100).all()
-    return {'device': device_payload(d), 'logs':[{'timestamp':x.timestamp.isoformat(), 'status':x.status,'response_time':x.response_time} for x in logs]}
+    scans = db.query(PortScan).filter_by(device_id=device_id).order_by(PortScan.timestamp.desc()).limit(25).all()
+    findings = db.query(VulnerabilityFinding).filter_by(device_id=device_id).order_by(VulnerabilityFinding.last_detected.desc()).all()
+    latest_ports = db.query(OpenPort).filter(OpenPort.scan_id == scans[0].id).all() if scans else []
+    previous = {p.port for p in db.query(OpenPort).filter_by(scan_id=scans[1].id, state="open").all()} if len(scans) > 1 else set()
+    return {'device': device_payload(d), 'logs':[{'timestamp':x.timestamp.isoformat(), 'status':x.status,'response_time':x.response_time} for x in logs],
+            'ports': [port_payload(x) for x in latest_ports], 'findings': [finding_payload(x) for x in findings],
+            'scans': [scan_payload(x) for x in scans], 'changes_since_previous': {"new_open_ports": [x.port for x in latest_ports if x.state == "open" and x.port not in previous]}}
 @app.post('/api/scan')
 @app.post('/api/discover')
 async def run_scan(db:Session=Depends(get_db)):
@@ -207,6 +237,11 @@ async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = 
     if not isinstance(target, IPv4Address) or not (target.is_private or target.is_loopback):
         raise HTTPException(400, 'Port scanning is limited to private or loopback IPv4 devices')
     from .port_scanner import ports_for
+    if payload.worker_count > MAX_SCAN_CONCURRENCY:
+        raise HTTPException(422, f'Concurrency may not exceed configured cap of {MAX_SCAN_CONCURRENCY}')
+    active = db.query(PortScan).filter_by(device_id=d.id).filter(PortScan.status.in_(["queued", "running", "cancelling"])).first()
+    if active:
+        raise HTTPException(409, f'A scan is already active for this device (scan {active.id})')
     total = len(ports_for(payload.scan_type))
     scan = PortScan(device_id=d.id, scan_type=payload.scan_type, status='queued', total_ports=total,
                     timeout_seconds=payload.timeout_seconds, worker_count=payload.worker_count)
@@ -215,6 +250,35 @@ async def start_port_scan(device_id: int, payload: PortScanStart, db: Session = 
                       payload.timeout_seconds, persist_port_scan_progress)
     log.info('Authorized %s port scan %s started for device %s (%s)', payload.scan_type, scan.id, d.ip_address, total)
     return {**scan_payload(scan), **job.snapshot()}
+
+
+@app.post('/api/assessments')
+async def start_target_assessment(payload: TargetScanStart, db: Session = Depends(get_db)):
+    """Start one job per explicit target; public ranges demand extra confirmation."""
+    if not payload.authorization_confirmed:
+        raise HTTPException(400, 'Confirm that you own or are authorized to test every target')
+    values = list(ip_network(payload.target).hosts()) if "/" in payload.target else [ip_address(payload.target)]
+    if any(not (x.is_private or x.is_loopback) for x in values) and not payload.public_target_confirmed:
+        raise HTTPException(400, 'Public targets require explicit public_target_confirmed acknowledgement')
+    if payload.worker_count > MAX_SCAN_CONCURRENCY:
+        raise HTTPException(422, f'Concurrency may not exceed configured cap of {MAX_SCAN_CONCURRENCY}')
+    started = []
+    for value in values:
+        address = str(value)
+        device = db.query(Device).filter_by(ip_address=address).first()
+        if device is None:
+            device = Device(ip_address=address, status='unknown')
+            db.add(device); db.flush()
+        if db.query(PortScan).filter_by(device_id=device.id).filter(PortScan.status.in_(["queued", "running", "cancelling"])).first():
+            continue
+        from .port_scanner import ports_for
+        scan = PortScan(device_id=device.id, scan_type=payload.scan_type, status='queued', total_ports=len(ports_for(payload.scan_type)), timeout_seconds=payload.timeout_seconds, worker_count=payload.worker_count)
+        db.add(scan); db.flush()
+        submit_scan(scan.id, address, payload.scan_type, payload.worker_count, payload.timeout_seconds, persist_port_scan_progress)
+        started.append(scan_payload(scan))
+    db.commit()
+    if not started: raise HTTPException(409, 'Every requested target already has an active scan')
+    return {'scans': started, 'target': payload.target}
 
 @app.get('/api/port-scans')
 def list_port_scans(device_id: int | None = None, db: Session = Depends(get_db)):
@@ -249,6 +313,26 @@ def list_open_ports(q: str = '', service: str = '', db: Session = Depends(get_db
         'scanned_at': scan.timestamp.isoformat() if scan.timestamp else None,
     } for port, scan, device in rows]
 
+@app.get('/api/findings')
+def list_findings(severity: str = '', device_id: int | None = None, db: Session = Depends(get_db)):
+    query = db.query(VulnerabilityFinding)
+    if severity:
+        if severity not in {"Critical", "High", "Medium", "Low", "Informational"}: raise HTTPException(422, 'Invalid severity')
+        query = query.filter_by(severity=severity)
+    if device_id is not None: query = query.filter_by(device_id=device_id)
+    return [finding_payload(x) | {'device_id': x.device_id, 'scan_id': x.scan_id} for x in query.order_by(VulnerabilityFinding.last_detected.desc()).limit(500)]
+
+@app.post('/api/devices/{device_id}/nvd-cves')
+async def match_trusted_cpe(device_id: int, payload: NvdCpeRequest, db: Session = Depends(get_db)):
+    """Optional NVD lookup; requires an exact CPE from a trusted inventory source."""
+    scan = db.query(PortScan).filter_by(device_id=device_id, status='completed').order_by(PortScan.timestamp.desc()).first()
+    if not scan: raise HTTPException(409, 'Run a completed authorized port scan before matching NVD data')
+    port = db.query(OpenPort).filter_by(scan_id=scan.id, port=payload.port, state='open').first()
+    if not port: raise HTTPException(404, 'The requested open port was not found in the latest completed scan')
+    cves = await asyncio.to_thread(fetch_cves_for_cpe, db, payload.cpe_name)
+    count = record_nvd_cves(db, scan, port, cves, payload.cpe_name)
+    return {'source': 'NVD', 'cpe_name': payload.cpe_name, 'records_cached': count, 'last_updated': datetime.now(timezone.utc).isoformat()}
+
 @app.get('/api/port-scans/{scan_id}')
 def port_scan_detail(scan_id: int, open_only: bool = True, service: str = '', min_port: int = 1, max_port: int = 65535, db: Session = Depends(get_db)):
     if not (1 <= min_port <= max_port <= 65535): raise HTTPException(422, 'Invalid port range')
@@ -278,7 +362,8 @@ def export_port_scan(scan_id: int, format: str, db: Session = Depends(get_db)):
     ports = db.query(OpenPort).filter_by(scan_id=scan_id).order_by(OpenPort.port).all()
     rows = [port_payload(port) for port in ports]
     if format == 'json':
-        content = json.dumps({'scan': scan_payload(scan), 'open_ports': rows}, indent=2).encode()
+        findings = db.query(VulnerabilityFinding).filter_by(scan_id=scan_id).all()
+        content = json.dumps({'scan': scan_payload(scan), 'ports': rows, 'findings': [finding_payload(x) for x in findings], 'limitations': 'TCP connect scan; service labels and banners are observations, not proof of product identity.'}, indent=2).encode()
         return Response(content, media_type='application/json', headers={'Content-Disposition': f'attachment; filename="netscan-port-scan-{scan_id}.json"'})
     if format == 'csv':
         output = io.StringIO(); writer = csv.DictWriter(output, fieldnames=['port', 'protocol', 'service', 'banner', 'state']); writer.writeheader(); writer.writerows(rows)
@@ -295,6 +380,7 @@ def put_settings(payload:SettingsIn,db:Session=Depends(get_db)):
 @app.get('/api/report/{kind}')
 @app.get('/api/reports/{kind}')
 def report(kind:str,db:Session=Depends(get_db)):
-    if kind not in ('csv','pdf'): raise HTTPException(400,'Unsupported report type')
-    path=csv_report(db.query(Device).all()) if kind=='csv' else pdf_report(db.query(Device).all())
+    if kind not in ('csv','json','pdf'): raise HTTPException(400,'Unsupported report type')
+    devices, findings = db.query(Device).all(), db.query(VulnerabilityFinding).order_by(VulnerabilityFinding.last_detected.desc()).all()
+    path=csv_report(devices, findings) if kind=='csv' else json_report(devices, findings) if kind=='json' else pdf_report(devices, findings)
     return FileResponse(path,filename=path.name)

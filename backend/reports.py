@@ -1,34 +1,40 @@
 import csv
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-from .models import Device, PortScan
+from .models import Device, PortScan, VulnerabilityFinding
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "reports"
 OUT.mkdir(exist_ok=True)
 
 
-def csv_report(devices):
+def csv_report(devices, findings=()):
     path = OUT / "netwatch-devices.csv"
     with path.open("w", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(["IP Address", "Hostname", "MAC", "Vendor", "Status", "First Seen", "Last Seen"])
+        writer.writerow(["record_type", "IP Address", "Hostname", "MAC", "Vendor", "Status", "First Seen", "Last Seen", "severity", "finding", "CVE", "evidence", "confidence", "remediation"])
         for device in devices:
-            writer.writerow([device.ip_address, device.hostname, device.mac_address, device.vendor, device.status, device.first_seen, device.last_seen])
+            writer.writerow(["device", device.ip_address, device.hostname, device.mac_address, device.vendor, device.status, device.first_seen, device.last_seen, "", "", "", "", "", ""])
+        for finding in findings:
+            writer.writerow(["finding", "", "", "", "", "", finding.first_detected, finding.last_detected, finding.severity, finding.title, finding.cve_id or "", finding.evidence, finding.confidence, finding.remediation])
     return path
 
 
-def pdf_report(devices):
+def pdf_report(devices, findings=()):
     path = OUT / "netwatch-report.pdf"
     report = canvas.Canvas(str(path), pagesize=letter)
     y = 750
     report.setFont("Helvetica-Bold", 16)
-    report.drawString(50, y, "NetWatch Network Report")
+    report.drawString(50, y, "NETSCAN Vulnerability Assessment Report")
     y -= 35
     report.setFont("Helvetica", 9)
+    report.drawString(50, y, f"Generated: {datetime.now(timezone.utc).isoformat()} | Scope: locally stored authorized scans")
+    y -= 20
     for device in devices:
         line = f"{device.ip_address} | {device.hostname or '-'} | {device.status} | {device.vendor or 'Unknown'}"
         report.drawString(50, y, line[:110])
@@ -37,7 +43,23 @@ def pdf_report(devices):
             report.showPage()
             y = 750
             report.setFont("Helvetica", 9)
+    y -= 10
+    for finding in findings:
+        if y < 70:
+            report.showPage(); y = 750; report.setFont("Helvetica", 9)
+        line = f"[{finding.severity}] {finding.title} | {finding.cve_id or finding.finding_type} | confidence {finding.confidence}"
+        report.drawString(50, y, line[:110]); y -= 13
+        report.drawString(60, y, (finding.remediation or "").replace("\n", " ")[:105]); y -= 16
     report.save()
+    return path
+
+
+def json_report(devices, findings=()):
+    path = OUT / "netscan-assessment.json"
+    payload = {"generated_at": datetime.now(timezone.utc).isoformat(), "limitations": "TCP connect and safe banner/TLS observations only; findings are not exploit verification.",
+               "devices": [{"ip_address": x.ip_address, "hostname": x.hostname, "status": x.status, "first_seen": x.first_seen.isoformat(), "last_seen": x.last_seen.isoformat() if x.last_seen else None} for x in devices],
+               "findings": [{"severity": x.severity, "confidence": x.confidence, "finding_type": x.finding_type, "title": x.title, "cve_id": x.cve_id, "evidence": x.evidence, "remediation": x.remediation, "reference_url": x.reference_url} for x in findings]}
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 

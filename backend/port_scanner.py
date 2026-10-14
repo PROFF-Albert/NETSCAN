@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import socket
+import errno
+import ssl
 import threading
 import time
 import uuid
@@ -26,6 +28,10 @@ QUICK_PORTS = (
 )
 STANDARD_PORTS = tuple(range(1, 1001))
 FULL_PORTS = tuple(range(1, 65536))
+# The standard profile intentionally has 1,000 ports.  The ordering favours
+# lower-numbered well-known ports; deployments may replace it with an approved
+# organization-specific top-port list without changing scanner semantics.
+STANDARD_PORTS = tuple(range(1, 1001))
 
 SERVICE_NAMES = {
     20: "FTP-data", 21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
@@ -63,15 +69,57 @@ def banner_for(sock: socket.socket, timeout: float) -> str | None:
         return None
 
 
-def scan_one(ip_address: str, port: int, timeout: float) -> dict | None:
+def version_from_banner(banner: str | None) -> str | None:
+    """Return a short observed banner fragment, never a claimed fingerprint."""
+    if not banner:
+        return None
+    # Banners are evidence only. Keep a bounded string for display/matching;
+    # CVE matching additionally requires an exact trusted CPE.
+    return banner[:255]
+
+
+def tls_evidence(ip_address: str, port: int, timeout: float) -> str | None:
+    """Passive TLS handshake metadata for HTTPS ports; no authentication."""
+    if port not in {443, 4443, 8443, 9443}:
+        return None
+    try:
+        # This is an observation, not certificate validation; untrusted local
+        # certificates should not suppress protocol metadata.
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        with socket.create_connection((ip_address, port), timeout=timeout) as raw:
+            with context.wrap_socket(raw, server_hostname=ip_address) as secure:
+                return f"TLS {secure.version() or 'unknown'}; cipher {secure.cipher()[0] if secure.cipher() else 'unknown'}"
+    except (OSError, ssl.SSLError):
+        return None
+
+
+def scan_one(ip_address: str, port: int, timeout: float) -> dict:
+    """TCP connect classification. It cannot reliably distinguish every filter.
+
+    A connect scan does not use raw packets, so timeout is conservatively marked
+    ``filtered`` and other socket failures ``unknown`` rather than overstated.
+    """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
-            if sock.connect_ex((ip_address, port)) != 0: return None
+            code = sock.connect_ex((ip_address, port))
+            if code == 0:
+                banner = banner_for(sock, timeout)
+                evidence = tls_evidence(ip_address, port, timeout)
+                return {"port": port, "protocol": "tcp", "service": service_for(port),
+                        "banner": banner, "service_version": version_from_banner(banner),
+                        "evidence": evidence, "state": "open"}
+            state = "closed" if code in {errno.ECONNREFUSED, 10061} else "filtered" if code in {errno.ETIMEDOUT, errno.EHOSTUNREACH, errno.ENETUNREACH} else "unknown"
             return {"port": port, "protocol": "tcp", "service": service_for(port),
-                    "banner": banner_for(sock, timeout), "state": "open"}
+                    "banner": None, "service_version": None, "evidence": None, "state": state}
+    except socket.timeout:
+        return {"port": port, "protocol": "tcp", "service": service_for(port), "banner": None,
+                "service_version": None, "evidence": None, "state": "filtered"}
     except OSError:
-        return None
+        return {"port": port, "protocol": "tcp", "service": service_for(port), "banner": None,
+                "service_version": None, "evidence": None, "state": "unknown"}
 
 
 @dataclass
@@ -146,9 +194,12 @@ def _run_scan(job: ScanJob, ports: Iterable[int], worker_count: int, timeout: fl
                     result = future.result()
                     with job.lock:
                         job.scanned_ports += 1
-                        if result:
+                        if result["state"] == "open":
                             job.open_ports_found += 1; new_results.append(result)
-                    if result: log.info("Port scan %s found %s/tcp (%s)", job.scan_id, result["port"], result["service"])
+                    # Persist open states and non-open classifications: results
+                    # are historical evidence, not just an open-port snapshot.
+                    if result["state"] != "open": new_results.append(result)
+                    if result["state"] == "open": log.info("Port scan %s found %s/tcp (%s)", job.scan_id, result["port"], result["service"])
                 while len(pending) < max_pending and queue_next(): pass
                 elapsed = max(time.monotonic() - (job.started_at or time.monotonic()), 0.001)
                 with job.lock:

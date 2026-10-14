@@ -5,23 +5,30 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NETSCAN</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/assessment.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to dashboard content</a>
   <aside>
     <div class="brand"><span>◈</span> NETSCAN</div>
     <nav><a class="active" href="#dashboard">▦ Dashboard</a><a href="#devices">⌁ Devices</a><a href="/open-ports">⌁ Open ports</a><a href="#reports">⇩ Reports</a><a href="#settings">⚙ Settings</a></nav>
     <div class="side-foot">LOCAL NETWORK<br><b>● Monitoring active</b></div>
   </aside>
-  <main>
-    <header><div><p class="eyebrow">NETWORK OPERATIONS</p><h1>Command center</h1></div><div class="actions"><span id="updated">Updating…</span><button id="scan">↻ Scan now</button></div></header>
+  <main id="main-content">
+    <header><div><p class="eyebrow">NETWORK OPERATIONS / LOCAL SCOPE</p><h1>Command center</h1></div><div class="actions"><span id="updated" aria-live="polite">Updating…</span><button id="scan" type="button">↻ Scan network</button></div></header>
     <section class="cards" id="dashboard">
       <div class="card"><small>TOTAL DEVICES</small><strong id="total">—</strong><span class="muted">Discovered on network</span></div>
       <div class="card"><small>ONLINE DEVICES</small><strong class="green" id="online">—</strong><span class="muted">Currently responding</span></div>
       <div class="card"><small>OFFLINE DEVICES</small><strong class="red" id="offline">—</strong><span class="muted">Not responding</span></div>
       <div class="card"><small>NETWORK HEALTH</small><strong class="blue" id="health">—%</strong><span class="muted">Availability score</span></div>
       <div class="card"><small>AVG LATENCY</small><strong id="latency">— ms</strong><span class="muted">Across online devices</span></div>
+      <div class="card"><small>OPEN TCP PORTS</small><strong class="blue" id="open-ports-count">—</strong><span class="muted">Historical scan observations</span></div>
+      <div class="card"><small>FINDINGS</small><strong id="findings-count">—</strong><span class="muted">Potential, confirmed, and info</span></div>
+      <div class="card"><small>CRITICAL / HIGH</small><strong class="red" id="critical-high">—</strong><span class="muted">Needs review</span></div>
     </section>
+    <section class="panel settings" id="assessment" aria-labelledby="assessment-title"><div class="panel-head"><div><h2 id="assessment-title">Authorized vulnerability assessment</h2><p>TCP scans are limited to private/local targets by default. Public targets need an extra acknowledgement.</p></div></div><form id="assessment-form"><label>Target IP or CIDR (max 256)<input id="target" autocomplete="off" placeholder="192.168.1.10 or 192.168.1.0/24" required></label><label>Profile<select id="scan_type"><option value="quick">Quick · 100 common ports</option><option value="standard">Standard · 1,000 ports</option><option value="full">Full · 1–65535</option></select></label><label>Timeout seconds<input id="scan_timeout" type="number" value=".75" min=".1" max="3" step=".1"></label><label>Concurrency<input id="scan_workers" type="number" value="64" min="1" max="128"></label><label><input id="authorized" type="checkbox" required> I own or am authorized to assess every target.</label><label><input id="public-confirmed" type="checkbox"> I explicitly confirm any public target.</label><button type="submit">Start assessment</button></form><p id="assessment-status" class="muted" aria-live="polite"></p></section>
+    <section class="panel" id="findings"><div class="panel-head"><div><h2>Recent findings</h2><p>Evidence-led observations; open ports are not CVEs by themselves.</p></div><a class="button secondary" href="/api/report/json">Download JSON</a></div><div class="table-wrap"><table><thead><tr><th>SEVERITY</th><th>TYPE</th><th>FINDING</th><th>PORT</th><th>CONFIDENCE</th><th>LAST DETECTED</th></tr></thead><tbody id="finding-rows"><tr><td colspan="6" class="empty">Loading findings…</td></tr></tbody></table></div></section>
     <section class="grid">
       <div class="panel wide" id="device-inventory">
         <div class="panel-head"><div><h2>Device inventory</h2><p>Devices observed during authorized discovery scans</p></div><div class="filters"><input id="search" placeholder="Search IP, hostname, or vendor…"><select id="status"><option value="">All statuses</option><option>online</option><option>offline</option></select></div></div>
@@ -33,6 +40,6 @@
     <section class="panel settings" id="settings"><div class="panel-head"><div><h2>Monitoring settings</h2><p>Configure the local discovery cycle</p></div></div><form id="settings-form"><label>Network range<input id="network_range" required></label><label>Scan interval (seconds)<input id="scan_interval" type="number" min="10" required></label><label>Ping timeout (seconds)<input id="ping_timeout" type="number" step=".1" min=".1" required></label><label>Refresh rate (seconds)<input id="refresh_rate" type="number" min="5" required></label><button>Save settings</button></form></section>
     <section class="panel reports" id="reports"><div><h2>Reports</h2><p>Export the current device inventory.</p></div><div><a class="button" href="/api/report/csv">Download CSV</a><a class="button secondary" href="/api/report/pdf">Download PDF</a></div></section>
   </main>
-  <div id="toast"></div><script src="/static/app.js"></script>
+  <div id="toast" role="status" aria-live="polite"></div><script src="/static/app.js"></script>
 </body>
 </html>

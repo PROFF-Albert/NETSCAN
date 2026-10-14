@@ -29,9 +29,44 @@ class DeviceOut(BaseModel):
 
 class PortScanStart(BaseModel):
     scan_type: Literal["quick", "standard", "full"] = "quick"
-    worker_count: int = Field(default=64, ge=1, le=256)
+    worker_count: int = Field(default=64, ge=1, le=128)
     timeout_seconds: float = Field(default=0.75, ge=0.1, le=3.0)
     authorization_confirmed: bool = False
+
+
+class TargetScanStart(PortScanStart):
+    """Explicit, authorization-gated local target or small CIDR scan request."""
+    target: str
+    public_target_confirmed: bool = False
+
+    @field_validator("target")
+    @classmethod
+    def safe_target(cls, value: str) -> str:
+        try:
+            if "/" in value:
+                network = ip_network(value, strict=False)
+                if not isinstance(network, IPv4Network) or network.num_addresses > 256:
+                    raise ValueError("CIDR target must be IPv4 and contain at most 256 addresses")
+                return str(network)
+            address = ip_address(value)
+            if not isinstance(address, IPv4Address):
+                raise ValueError("Only IPv4 targets are supported")
+            return str(address)
+        except ValueError as exc:
+            raise ValueError("Enter a valid IPv4 address or CIDR of at most 256 addresses") from exc
+
+
+class NvdCpeRequest(BaseModel):
+    """An operator-supplied, trusted exact CPE; banners are never accepted here."""
+    cpe_name: str = Field(min_length=12, max_length=1024)
+    port: int = Field(ge=1, le=65535)
+
+    @field_validator("cpe_name")
+    @classmethod
+    def exact_cpe(cls, value: str) -> str:
+        if not value.startswith("cpe:2.3:"):
+            raise ValueError("Provide a trusted CPE 2.3 name, not a banner or guessed version")
+        return value
 
 
 # Compatibility request models for the optional router module. Keeping these

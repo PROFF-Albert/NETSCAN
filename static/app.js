@@ -1,4 +1,5 @@
 let healthChart;
+let latencyChart;
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
 
@@ -12,6 +13,13 @@ function toast(message) {
   $("toast").textContent = message;
   $("toast").style.display = "block";
   setTimeout(() => $("toast").style.display = "none", 3500);
+}
+
+function setBusy(button, busy, label) {
+  if (!button) return;
+  if (busy) button.dataset.label = button.textContent;
+  button.disabled = busy;
+  button.textContent = busy ? label : (button.dataset.label || button.textContent);
 }
 
 function display(value, fallback = "Unknown") {
@@ -32,7 +40,7 @@ function renderDeviceRows(devices) {
       <td>${display(device.vendor, "Unknown")}</td>
       <td><span class="status-pill ${esc(device.status)}">${esc(device.status)}</span></td>
       <td>${device.last_seen ? new Date(device.last_seen).toLocaleString() : "—"}</td>
-      <td><button onclick="portScan(${device.id})" title="Scan common ports">Ports</button></td>
+      <td><a class="button" href="/devices/${device.id}">Details</a></td>
     </tr>`).join("");
 }
 
@@ -44,14 +52,25 @@ async function refresh() {
     $("offline").textContent = summary.offline;
     $("health").textContent = `${summary.health}%`;
     $("latency").textContent = `${summary.latency} ms`;
+    $("open-ports-count").textContent = summary.total_open_ports;
+    $("findings-count").textContent = summary.total_findings;
+    $("critical-high").textContent = summary.critical_high_findings;
     const query = encodeURIComponent($("search").value);
     const list = await api(`/api/devices?q=${query}&status=${$("status").value}`);
     renderDeviceRows(list);
+    const findings = await api("/api/findings");
+    $("finding-rows").innerHTML = findings.length ? findings.slice(0, 10).map((f) => `<tr><td><span class="severity ${esc(f.severity)}">${esc(f.severity)}</span></td><td>${esc(f.finding_type)}</td><td>${esc(f.title)}</td><td>${f.port || "—"}</td><td>${esc(f.confidence)}</td><td>${f.last_detected ? new Date(f.last_detected).toLocaleString() : "—"}</td></tr>`).join("") : '<tr><td colspan="6" class="empty">No assessment findings yet.</td></tr>';
     if (healthChart) {
       healthChart.data.datasets[0].data = [summary.online, summary.offline];
       healthChart.update();
     } else if (window.Chart) {
       healthChart = new Chart($("healthChart"), {type:"doughnut", data:{labels:["Online","Offline"],datasets:[{data:[summary.online,summary.offline],backgroundColor:["#43d9cb","#ff6e83"],borderWidth:0}]},options:{plugins:{legend:{display:false}},cutout:"76%",maintainAspectRatio:false}});
+    }
+    if (!latencyChart && window.Chart) {
+      latencyChart = new Chart($("latencyChart"), {type:"bar", data:{labels:["Current average"],datasets:[{data:[summary.latency],backgroundColor:"#8eaeff",borderRadius:6,maxBarThickness:62}]},options:{plugins:{legend:{display:false}},scales:{x:{display:false,grid:{display:false}},y:{ticks:{color:"#94a4b7"},grid:{color:"rgba(59,81,108,.35)"},beginAtZero:true}},maintainAspectRatio:false}});
+    } else if (latencyChart) {
+      latencyChart.data.datasets[0].data = [summary.latency];
+      latencyChart.update();
     }
     $("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (error) {
@@ -84,12 +103,15 @@ async function portScan(id) {
 }
 
 $("scan").onclick = async () => {
+  const button = $("scan");
+  setBusy(button, true, "Scanning…");
   toast("Scanning authorized local network…");
   try {
     const result = await api("/api/scan", {method:"POST"});
     toast(`Scan complete: ${result.found} responding device(s)`);
     refresh();
   } catch (error) { toast("Scan failed — see server logs for ARP/permission details"); }
+  finally { setBusy(button, false); }
 };
 $("search").oninput = refresh;
 $("status").onchange = refresh;
@@ -99,6 +121,19 @@ $("settings-form").onsubmit = async (event) => {
   for (const key of ["network_range", "scan_interval", "ping_timeout", "refresh_rate"]) payload[key] = Number.isNaN(Number($(key).value)) ? $(key).value : Number($(key).value);
   try { await api("/api/settings", {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)}); toast("Settings saved"); }
   catch (_) { toast("Invalid settings"); }
+};
+
+$("assessment-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  setBusy(button, true, "Starting…");
+  const payload = {target: $("target").value, scan_type: $("scan_type").value, timeout_seconds: Number($("scan_timeout").value), worker_count: Number($("scan_workers").value), authorization_confirmed: $("authorized").checked, public_target_confirmed: $("public-confirmed").checked};
+  try {
+    const result = await api("/api/assessments", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
+    $("assessment-status").textContent = `Started ${result.scans.length} scan(s): ${result.scans.map((s) => s.id).join(", ")}.`;
+    toast("Assessment started"); refresh();
+  } catch (error) { $("assessment-status").textContent = "Could not start assessment: " + error.message; toast("Assessment request rejected"); }
+  finally { setBusy(button, false); }
 };
 
 loadSettings().catch(() => toast("Unable to load settings"));
